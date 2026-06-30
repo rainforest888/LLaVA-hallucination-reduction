@@ -15,9 +15,10 @@ import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
 MODEL_ID = "llava-hf/llava-1.5-7b-hf"
-POPE_DIR = r"G:\sample\Qwen3vl\POPE-main\POPE-main\output\coco"
-IMAGE_DIR = r"G:\sample\Qwen3vl\val2014\val2014"
-OUT_DIR = r"G:\sample\llava_project\pope_results\baseline"
+BASE = r"G:\claude code_workspace\GRPO-VLLM-hallucination-reduction"
+POPE_DIR = os.path.join(BASE, r"Qwen3vl\POPE-main\POPE-main\output\coco")
+IMAGE_DIR = os.path.join(BASE, r"Qwen3vl\val2014\val2014")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "pope_results", "baseline")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 ap = argparse.ArgumentParser()

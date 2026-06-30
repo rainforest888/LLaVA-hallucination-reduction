@@ -8,8 +8,8 @@ Usage:
 import json
 import os
 
-POPE_DIR = r"G:\sample\Qwen3vl\POPE-main\POPE-main\output\coco"
-RESULTS_BASE = r"G:\sample\Qwen3vl\router_project\pope_results"
+POPE_DIR = r"G:\claude code_workspace\GRPO-VLLM-hallucination-reduction\Qwen3vl\POPE-main\POPE-main\output\coco"
+RESULTS_BASE = os.path.join(os.path.dirname(__file__), "pope_results")
 
 
 def load_jsonl(path):
