@@ -2,14 +2,18 @@
 LLaVA POPE Baseline Inference.
 Runs full POPE evaluation (random, popular, adversarial) on LLaVA-1.5-7B.
 
+Uses 4-bit quantization (bitsandbytes NF4) to fit the 14 GB model
+into 8 GB laptop GPU. Expect ~2-4s/sample.
+
 Usage:
     source /g/Conda/etc/profile.d/conda.sh && conda activate qwen3vl
-    cd /g/sample/llava_project
     python pope_baseline.py
+    python pope_baseline.py --subsets random --max_n 200
+    python pope_baseline.py --subsets adversarial,max_n 500
 """
 import json, os, sys, torch, argparse
 from tqdm import tqdm
-from transformers import LlavaForConditionalGeneration, AutoProcessor
+from transformers import LlavaForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
 from PIL import Image
 import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -34,13 +38,21 @@ def answer_yes_no(text):
     return "no" if ("no" in w or "not" in w) else "yes"
 
 
-print("Loading LLaVA-1.5-7B...")
+print("Loading LLaVA-1.5-7B with 4-bit quantization...")
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4",
+)
 model = LlavaForConditionalGeneration.from_pretrained(
-    MODEL_ID, torch_dtype=torch.float16, device_map="auto",
+    MODEL_ID,
+    quantization_config=quant_config,
+    device_map="auto",
     local_files_only=True,
 )
 processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)
-print(f"Loaded. VRAM: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+print(f"Loaded. VRAM: {torch.cuda.memory_allocated()/1e9:.1f} GB / {torch.cuda.memory_reserved()/1e9:.1f} GB reserved")
 
 for subset in args.subsets.split(","):
     subset = subset.strip()
@@ -65,12 +77,17 @@ for subset in args.subsets.split(","):
 
         with torch.no_grad():
             gen = model.generate(**inputs, max_new_tokens=8)
-        raw = processor.decode(gen[0, inputs.input_ids.shape[1]:],
-                               skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        raw = processor.decode(
+            gen[0, inputs.input_ids.shape[1]:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
         ans = answer_yes_no(raw)
-        if ans == "yes": yes_count += 1
+        if ans == "yes":
+            yes_count += 1
         results.append({"question": q["text"], "answer": ans, "raw_output": raw})
 
+    # Write results incrementally-protected: only after each subset finishes
     with open(out_file, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -82,4 +99,4 @@ for subset in args.subsets.split(","):
     torch.cuda.empty_cache()
 
 print(f"\nBaseline complete. Results in {OUT_DIR}/")
-print("Next: write pope_evaluate.py to compute TP/FP/TN/FN/Precision/Recall/F1")
+print("Next: python pope_evaluate.py baseline")
