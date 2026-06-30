@@ -1,0 +1,1 @@
+- [LLaVA Project Status](project-status.md) — Complete state as of 2026-06-30
