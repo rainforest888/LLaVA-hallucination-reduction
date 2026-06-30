@@ -20,13 +20,15 @@ The companion project for **Qwen3-VL-2B** is at [GRPO-VLLM-hallucination-reducti
 | Vision-Language Connector | MLP projection |
 | Total Attention Modules | 32 LM layers |
 
-## POPE Baseline Results
+## POPE Baseline Results (500 adversarial)
 
-| Subset | Acc | Prec | Rec | F1 | Yes Ratio |
-|--------|:---:|:---:|:---:|:---:|:---:|
-| Random (3000) | TBD | TBD | TBD | TBD | TBD |
-| Popular (3000) | TBD | TBD | TBD | TBD | TBD |
-| Adversarial (500) | 0.8320 | 0.8547 | 0.8000 | 0.8264 | 0.4680 |
+| Strategy | Accuracy | Precision | Recall | F1 | Yes% | Δ |
+|----------|:--------:|:---------:|:------:|:----:|:----:|:--:|
+| Baseline | 83.20% | 85.47% | 80.00% | 82.64% | 46.80% | — |
+| UAC L15 α=0.77 | 83.20% | 86.40% | 78.80% | 82.43% | 45.60% | +0.00% |
+| AdaIAT-U L15 α=1.0 | 83.20% | 86.40% | 78.80% | 82.43% | 45.60% | +0.00% |
+
+**Key finding**: Per-layer attention correction strategies (UAC, AdaIAT-U) are ineffective on LLaVA-1.5-7B because its self-attention is extremely concentrated (Gini > 0.98). Unlike Qwen3-VL-2B (Gini ~0.96) where these strategies had a narrow +0.2% effect, LLaVA's attention pattern is near-one-hot — one position gets 60-90% of weight per head, making re-weighting unable to change the argmax.
 
 ## Setup
 
