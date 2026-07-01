@@ -19,7 +19,7 @@ SEG_FILE = os.path.join(BASE, r"Qwen3vl\POPE-main\POPE-main\segmentation\coco_gr
 ap = argparse.ArgumentParser()
 ap.add_argument("--n_images", type=int, default=100)
 ap.add_argument("--seed", type=int, default=42)
-ap.add_argument("--strategy", type=str, default="none", choices=["none","uac","ada_iat_u","vcd","vhr","clip","lcd"])
+ap.add_argument("--strategy", type=str, default="none", choices=["none","uac","ada_iat_u","vcd","vhr","clip","lcd","beam","otp"])
 ap.add_argument("--outdir", type=str, default=None)
 ap.add_argument("--layer", type=int, default=15)
 ap.add_argument("--alpha", type=float, default=0.77)
@@ -212,6 +212,23 @@ for e in tqdm(sample, desc=f"CHAIR {args.strategy}"):
                 return sc
         with torch.no_grad():
             gen = model.generate(**inputs, max_new_tokens=64, logits_processor=[LCDLP(nl, args.alpha)])
+    
+    elif args.strategy == "beam":
+        with torch.no_grad():
+            gen = model.generate(**inputs, max_new_tokens=64, num_beams=3, early_stopping=True)
+    
+    elif args.strategy == "otp":
+        # OTP: penalize over-confident tokens (max logit >> mean logit)
+        class OTPLP:
+            def __init__(s, thr=3.0, penalty=2.0): s.thr, s.pen = thr, penalty
+            def __call__(s, ids, sc):
+                top = sc.max(dim=-1, keepdim=True)
+                ratio = top.values / sc.mean(dim=-1, keepdim=True).clamp_min(1e-8)
+                if ratio.item() > s.thr:
+                    sc.scatter_(-1, top.indices, top.values - s.pen)
+                return sc
+        with torch.no_grad():
+            gen = model.generate(**inputs, max_new_tokens=64, logits_processor=[OTPLP()])
     
     elif args.strategy in ("uac", "ada_iat_u", "vhr"):
         attn_mod = model.model.language_model.layers[args.layer].self_attn
