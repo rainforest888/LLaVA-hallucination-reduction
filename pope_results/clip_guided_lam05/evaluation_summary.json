@@ -1,0 +1,13 @@
+{
+  "adversarial": {
+    "TP": 1173,
+    "FP": 173,
+    "TN": 1327,
+    "FN": 327,
+    "Accuracy": 0.8333,
+    "Precision": 0.8715,
+    "Recall": 0.782,
+    "F1": 0.8243,
+    "Yes_Ratio": 0.4487
+  }
+}
