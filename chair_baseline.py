@@ -19,7 +19,7 @@ SEG_FILE = os.path.join(BASE, r"Qwen3vl\POPE-main\POPE-main\segmentation\coco_gr
 ap = argparse.ArgumentParser()
 ap.add_argument("--n_images", type=int, default=100)
 ap.add_argument("--seed", type=int, default=42)
-ap.add_argument("--strategy", type=str, default="none", choices=["none","uac","ada_iat_u","vcd","vhr","clip","lcd","beam","otp"])
+ap.add_argument("--strategy", type=str, default="none", choices=["none","uac","ada_iat_u","vcd","vhr","clip","lcd","beam","otp","uac_multi","dola","method_b","method_c"])
 ap.add_argument("--outdir", type=str, default=None)
 ap.add_argument("--layer", type=int, default=15)
 ap.add_argument("--alpha", type=float, default=0.77)
@@ -48,11 +48,11 @@ model = LlavaForConditionalGeneration.from_pretrained(
         load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16,
         bnb_4bit_use_double_quant=True, bnb_4bit_quant_type="nf4"),
     device_map="auto", local_files_only=True,
-    attn_implementation="eager" if args.strategy in ("uac","ada_iat_u","vhr") else "sdpa")
+    attn_implementation="eager" if args.strategy in ("uac","ada_iat_u","vhr","method_b","method_c") else "sdpa")
 processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)
 print(f"VRAM: {torch.cuda.memory_allocated()/1e9:.1f}GB")
 
-if args.strategy in ("uac", "ada_iat_u", "vhr"):
+if args.strategy in ("uac", "ada_iat_u", "vhr", "method_b", "method_c"):
     model.model.language_model.config.output_attentions = True
 # =========== UAC Calibration ===========
 if args.strategy == "uac":
@@ -230,7 +230,7 @@ for e in tqdm(sample, desc=f"CHAIR {args.strategy}"):
         with torch.no_grad():
             gen = model.generate(**inputs, max_new_tokens=64, logits_processor=[OTPLP()])
     
-    elif args.strategy in ("uac", "ada_iat_u", "vhr"):
+    elif args.strategy in ("uac", "ada_iat_u", "vhr", "method_b", "method_c"):
         attn_mod = model.model.language_model.layers[args.layer].self_attn
         orig_forward = attn_mod.forward
         
@@ -305,13 +305,60 @@ for e in tqdm(sample, desc=f"CHAIR {args.strategy}"):
         if args.strategy == "uac": attn_mod.forward = uac_forward
         elif args.strategy == "ada_iat_u": attn_mod.forward = adaiat_forward
         elif args.strategy == "vhr": attn_mod.forward = vhr_forward
+        elif args.strategy == "method_b":
+            def method_b_forward(hidden_states, position_embeddings=None, attention_mask=None, past_key_values=None, **kwargs):
+                H = model.config.text_config.num_attention_heads
+                bsz, q_len, _ = hidden_states.size()
+                q = attn_mod.q_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                k = attn_mod.k_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                v = attn_mod.v_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                if past_key_values is not None: k, v = past_key_values.update(k, v, attn_mod.layer_idx)
+                aw = torch.matmul(q, k.transpose(-2,-1)) / (attn_mod.head_dim**0.5)
+                if attention_mask is not None: aw = aw + attention_mask[:,:,:,:k.shape[-2]]
+                aw = F.softmax(aw, dim=-1, dtype=torch.float32).to(q.dtype)
+                # Method B: entropy-guided sharpening on visual tokens (0-575)
+                vis_end = min(576, aw.shape[-1])
+                attn_vis = aw[:,:,-1,:vis_end]  # (1,H,1,vis_end)
+                ent = -(attn_vis * torch.log(attn_vis.clamp_min(1e-8))).sum(dim=-1)  # (1,H,1)
+                ent_norm = ent / ent.max().clamp_min(1e-8)  # normalize
+                sharp = 1.0 + args.alpha * (1.0 - ent_norm)  # low entropy → high sharp
+                aw[:,:,-1,:vis_end] = attn_vis ** sharp.unsqueeze(-1)
+                aw[:,:,-1,:vis_end] = aw[:,:,-1,:vis_end] / aw[:,:,-1,:vis_end].sum(dim=-1,keepdim=True).clamp_min(1e-8)
+                out = torch.matmul(aw, v)
+                out = out.transpose(1,2).contiguous().reshape(bsz,q_len,-1)
+                return attn_mod.o_proj(out), aw
+            attn_mod.forward = method_b_forward
+        elif args.strategy == "method_c":
+            def method_c_forward(hidden_states, position_embeddings=None, attention_mask=None, past_key_values=None, **kwargs):
+                H = model.config.text_config.num_attention_heads
+                bsz, q_len, _ = hidden_states.size()
+                q = attn_mod.q_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                k = attn_mod.k_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                v = attn_mod.v_proj(hidden_states).view(bsz,q_len,H,-1).transpose(1,2)
+                if past_key_values is not None: k, v = past_key_values.update(k, v, attn_mod.layer_idx)
+                aw = torch.matmul(q, k.transpose(-2,-1)) / (attn_mod.head_dim**0.5)
+                if attention_mask is not None: aw = aw + attention_mask[:,:,:,:k.shape[-2]]
+                aw = F.softmax(aw, dim=-1, dtype=torch.float32).to(q.dtype)
+                # Method C: head consensus on last query row, image tokens
+                vis_end = min(576, aw.shape[-1])
+                attn_vis = aw[:,:,-1,:vis_end]  # (1,H,1,vis_end)
+                # Which heads agree? Heads with similar attention patterns
+                attn_flat = attn_vis.squeeze(0).squeeze(1)  # (H, vis_end)
+                consensus = (attn_flat @ attn_flat.T) / (attn_flat.norm(dim=1).unsqueeze(1) * attn_flat.norm(dim=1).unsqueeze(0) + 1e-8)
+                consensus_score = consensus.mean(dim=1, keepdim=True).unsqueeze(0).unsqueeze(2)  # (1,H,1,1)
+                aw[:,:,-1,:vis_end] = attn_vis * (1.0 + args.alpha * consensus_score)
+                aw[:,:,-1,:vis_end] = aw[:,:,-1,:vis_end] / aw[:,:,-1,:vis_end].sum(dim=-1,keepdim=True).clamp_min(1e-8)
+                out = torch.matmul(aw, v)
+                out = out.transpose(1,2).contiguous().reshape(bsz,q_len,-1)
+                return attn_mod.o_proj(out), aw
+            attn_mod.forward = method_c_forward
 
     with torch.no_grad():
         gen = model.generate(**inputs, max_new_tokens=64)
     raw = processor.decode(gen[0, inputs.input_ids.shape[1]:], skip_special_tokens=True, clean_up_tokenization_spaces=False)
     results.append({"image_id": e["image_id"], "image": e["image"], "caption": raw.strip()})
 
-    if args.strategy in ("uac", "ada_iat_u", "vhr"):
+    if args.strategy in ("uac", "ada_iat_u", "vhr", "method_b", "method_c"):
         attn_mod.forward = orig_forward
     torch.cuda.empty_cache()
 
